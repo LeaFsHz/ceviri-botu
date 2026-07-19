@@ -359,6 +359,136 @@ async def zar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             game["rolling"] = False
 
 
+# ------------------ Kelime Oyunu / Игра в слова ------------------
+# Sadece net, tartışmasız çevirisi olan kelimeler seçildi (yanlış öğrenilmesin diye).
+WORD_PAIRS = [
+    ("elma", "яблоко"),
+    ("su", "вода"),
+    ("ev", "дом"),
+    ("kedi", "кошка"),
+    ("köpek", "собака"),
+    ("kitap", "книга"),
+    ("aşk", "любовь"),
+    ("güneş", "солнце"),
+    ("deniz", "море"),
+    ("dağ", "гора"),
+    ("ağaç", "дерево"),
+    ("çiçek", "цветок"),
+    ("kuş", "птица"),
+    ("balık", "рыба"),
+    ("süt", "молоко"),
+    ("ekmek", "хлеб"),
+    ("kahve", "кофе"),
+    ("çay", "чай"),
+    ("okul", "школа"),
+    ("araba", "машина"),
+    ("şehir", "город"),
+    ("arkadaş", "друг"),
+    ("aile", "семья"),
+    ("gün", "день"),
+    ("gece", "ночь"),
+    ("yıldız", "звезда"),
+    ("güzel", "красивый"),
+    ("büyük", "большой"),
+    ("küçük", "маленький"),
+    ("evet", "да"),
+    ("hayır", "нет"),
+    ("teşekkürler", "спасибо"),
+]
+
+# chat_id -> {"correct_index": int, "options": [str, str, str]}
+kelime_games: dict[int, dict] = {}
+
+
+async def send_kelime_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tr, ru = random.choice(WORD_PAIRS)
+    ask_ru_to_tr = random.random() < 0.5
+
+    if ask_ru_to_tr:
+        correct_answer = tr
+        header = (
+            f'🇷🇺 "{ru}" kelimesi Türkçe\'de ne demek?\n'
+            f'🇷🇺 Что значит слово "{ru}" по-турецки?'
+        )
+        pool = [pair[0] for pair in WORD_PAIRS if pair[0] != correct_answer]
+    else:
+        correct_answer = ru
+        header = (
+            f'🇹🇷 "{tr}" kelimesi Rusça\'da ne demek?\n'
+            f'🇹🇷 Что значит слово "{tr}" по-русски?'
+        )
+        pool = [pair[1] for pair in WORD_PAIRS if pair[1] != correct_answer]
+
+    wrong_answers = random.sample(pool, 2)
+    options = [correct_answer] + wrong_answers
+    random.shuffle(options)
+    correct_index = options.index(correct_answer)
+
+    kelime_games[chat_id] = {"correct_index": correct_index, "options": options}
+
+    keyboard = [
+        [InlineKeyboardButton(opt, callback_data=f"kelime_{i}") for i, opt in enumerate(options)]
+    ]
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, text=header, reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        logger.exception("Kelime sorusu gönderilirken hata")
+
+
+async def kelime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "📚 Kelime oyunu başladı! Doğru cevaba tıkla.\n"
+        "📚 Игра в слова началась! Нажми на правильный ответ."
+    )
+    await send_kelime_question(chat_id, context)
+
+
+async def kelimes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if kelime_games.pop(chat_id, None) is not None:
+        text = "🛑 Kelime oyunu durduruldu.\n🛑 Игра в слова остановлена."
+    else:
+        text = "Aktif kelime oyunu yok.\nНет активной игры в слова."
+    await update.message.reply_text(text)
+
+
+async def kelime_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    game = kelime_games.get(chat_id)
+
+    if game is None:
+        await query.answer(
+            "Aktif oyun yok, /kelime ile başlat.\nНет активной игры, начни с /kelime.",
+            show_alert=True,
+        )
+        return
+
+    chosen_index = int(query.data.replace("kelime_", ""))
+    correct_index = game["correct_index"]
+    options = game["options"]
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if chosen_index == correct_index:
+        await query.answer("Doğru! 🎉\nПравильно! 🎉")
+    else:
+        await query.answer(
+            f"Yanlış. Doğrusu: {options[correct_index]}\n"
+            f"Неправильно. Правильный ответ: {options[correct_index]}",
+            show_alert=True,
+        )
+
+    if chat_id in kelime_games:
+        await send_kelime_question(chat_id, context)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Beklenmeyen bir hata olursa bot çökmesin, sadece kaydedip devam etsin.
     logger.exception("Beklenmeyen hata: %s", context.error)
@@ -372,8 +502,11 @@ def main() -> None:
     app.add_handler(CommandHandler("zars", zars_command))
     app.add_handler(CommandHandler("kosti", zar_command))
     app.add_handler(CommandHandler("kostistop", zars_command))
+    app.add_handler(CommandHandler("kelime", kelime_command))
+    app.add_handler(CommandHandler("kelimes", kelimes_command))
     app.add_handler(CallbackQueryHandler(tkm_callback, pattern="^tkm_"))
     app.add_handler(CallbackQueryHandler(zar_callback, pattern="^zar_"))
+    app.add_handler(CallbackQueryHandler(kelime_callback, pattern="^kelime_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
     logger.info("Bot başlatıldı, mesajlar dinleniyor...")
