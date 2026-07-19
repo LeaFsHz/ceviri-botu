@@ -1,5 +1,6 @@
 import os
 import re
+import random
 import asyncio
 import logging
 
@@ -202,6 +203,7 @@ async def zar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "positions": {user.id: 0},
         "turn": 0,
         "started": False,
+        "rolling": False,
     }
     text = (
         f"🎲 {name} zar oyunu başlattı! Katılmak için butona bas.\n"
@@ -272,10 +274,19 @@ async def zar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await query.answer("Sıra sende değil.\nСейчас не твой ход.", show_alert=True)
             return
 
+        # Aynı anda iki kere basılırsa ikinci isteği görmezden gel (çakışmayı önler).
+        if game.get("rolling"):
+            await query.answer("Zar zaten atılıyor, bekle.\nКости уже брошены, подожди.")
+            return
+        game["rolling"] = True
+
         await query.answer()
 
         # Bu tur için kullanılan butonu kaldır, tekrar tıklanmasın.
-        await query.edit_message_reply_markup(reply_markup=None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
         dice_message = await context.bot.send_dice(chat_id=chat_id, emoji="🎲")
         value = dice_message.dice.value
@@ -295,16 +306,40 @@ async def zar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             dice_games.pop(chat_id, None)
             return
 
+        # Küçük ihtimalle bir "yaratık" oyuncuyu rastgele bir kata taşır.
+        creature_text = ""
+        if random.random() < 0.15:
+            new_pos = random.randint(0, DICE_BOARD_LEN - 1)
+            if new_pos > pos:
+                creature_text = (
+                    f"\n\n🐉 Bir yaratık seni {pos}. kattan {new_pos}. kata çıkardı!\n"
+                    f"🐉 Существо подняло тебя с этажа {pos} на {new_pos}!"
+                )
+            elif new_pos < pos:
+                creature_text = (
+                    f"\n\n👻 Bir yaratık seni {pos}. kattan {new_pos}. kata sürükledi!\n"
+                    f"👻 Существо утащило тебя с этажа {pos} на {new_pos}!"
+                )
+            game["positions"][user.id] = new_pos
+            pos = new_pos
+
         game["turn"] = 1 - game["turn"]
+        game["rolling"] = False
         next_id, next_name = game["players"][game["turn"]]
         text = (
             f"🎲 {current_name}: {value} attı, konum {pos}/{DICE_BOARD_LEN}\n"
-            f"🎲 {current_name}: выбросил(а) {value}, позиция {pos}/{DICE_BOARD_LEN}\n\n"
+            f"🎲 {current_name}: выбросил(а) {value}, позиция {pos}/{DICE_BOARD_LEN}"
+            f"{creature_text}\n\n"
             f"Sıra sende, {next_name}!\n"
             f"Твой ход, {next_name}!"
         )
         keyboard = [[InlineKeyboardButton("🎲 Zar at / Бросить кости", callback_data="zar_roll")]]
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Beklenmeyen bir hata olursa bot çökmesin, sadece kaydedip devam etsin.
+    logger.exception("Beklenmeyen hata: %s", context.error)
 
 
 def main() -> None:
@@ -318,8 +353,11 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(tkm_callback, pattern="^tkm_"))
     app.add_handler(CallbackQueryHandler(zar_callback, pattern="^zar_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
     logger.info("Bot başlatıldı, mesajlar dinleniyor...")
-    app.run_polling()
+    # drop_pending_updates: bot kapalıyken biriken eski mesajları yok sayar,
+    # açılışta "spam çeviri" yapmasını engeller.
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
