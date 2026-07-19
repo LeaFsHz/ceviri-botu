@@ -26,6 +26,25 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 
 
+# Google Translate'in bağlamı kaçırıp yanlış çevirdiği argo/ünlem kelimeler.
+# Anahtar küçük harfe çevrilmiş haliyle aranır.
+MANUAL_OVERRIDES = {
+    "ru_to_tr": {
+        "блядь": "siktir",
+        "бля": "lan",
+        "черт": "kahretsin",
+        "пиздец": "eyvah",
+        "сука": "orospu çocuğu",
+    },
+    "tr_to_ru": {
+        "siktir": "блядь",
+        "lan": "бля",
+        "kahretsin": "черт",
+        "amk": "бля",
+    },
+}
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None or not message.text:
@@ -42,6 +61,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     is_russian = bool(CYRILLIC_RE.search(text))
     source_lang = "RU" if is_russian else "TR"
     target_lang = "TR" if is_russian else "RU"
+
+    override_table = MANUAL_OVERRIDES["ru_to_tr" if is_russian else "tr_to_ru"]
+    stripped = text.strip(" .,!?").lower()
+    if stripped in override_table:
+        await message.reply_text(override_table[stripped])
+        return
 
     try:
         translated_text = GoogleTranslator(
@@ -153,11 +178,145 @@ async def kalems_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(text)
 
 
+# ------------------ Zar Oyunu / Игра в кости ------------------
+
+DICE_BOARD_LEN = 20
+
+# chat_id -> {"players": [(user_id, isim), ...], "positions": {user_id: konum}, "turn": 0/1, "started": bool}
+dice_games: dict[int, dict] = {}
+
+
+async def zar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    name = user.first_name or user.username or "Oyuncu"
+
+    if chat_id in dice_games:
+        await update.message.reply_text(
+            "Zaten aktif bir zar oyunu var.\nИгра в кости уже идёт."
+        )
+        return
+
+    dice_games[chat_id] = {
+        "players": [(user.id, name)],
+        "positions": {user.id: 0},
+        "turn": 0,
+        "started": False,
+    }
+    text = (
+        f"🎲 {name} zar oyunu başlattı! Katılmak için butona bas.\n"
+        f"🎲 {name} начал(а) игру в кости! Нажми, чтобы присоединиться."
+    )
+    keyboard = [[InlineKeyboardButton("🙋 Katıl / Присоединиться", callback_data="zar_join")]]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def zars_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if dice_games.pop(chat_id, None) is not None:
+        text = "🛑 Zar oyunu durduruldu.\n🛑 Игра в кости остановлена."
+    else:
+        text = "Aktif zar oyunu yok.\nНет активной игры в кости."
+    await update.message.reply_text(text)
+
+
+async def zar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    game = dice_games.get(chat_id)
+    user = query.from_user
+    name = user.first_name or user.username or "Oyuncu"
+
+    if game is None:
+        await query.answer(
+            "Aktif oyun yok, /zar ile başlat.\nНет активной игры, начни с /zar.",
+            show_alert=True,
+        )
+        return
+
+    if query.data == "zar_join":
+        if len(game["players"]) >= 2:
+            await query.answer("Oyun zaten dolu.\nИгра уже заполнена.", show_alert=True)
+            return
+        if user.id == game["players"][0][0]:
+            await query.answer("Zaten oyundasın.\nТы уже в игре.", show_alert=True)
+            return
+
+        game["players"].append((user.id, name))
+        game["positions"][user.id] = 0
+        game["started"] = True
+        await query.answer("Katıldın!\nТы присоединился(лась)!")
+
+        # Artık gerek kalmayan "Katıl" butonunu kaldır.
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        current_id, current_name = game["players"][game["turn"]]
+        text = (
+            f"✅ Oyun başladı! Sıra sende, {current_name}\n"
+            f"✅ Игра началась! Твой ход, {current_name}"
+        )
+        keyboard = [[InlineKeyboardButton("🎲 Zar at / Бросить кости", callback_data="zar_roll")]]
+        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if query.data == "zar_roll":
+        if not game.get("started"):
+            await query.answer(
+                "Önce ikinci oyuncu katılmalı.\nСначала должен присоединиться второй игрок.",
+                show_alert=True,
+            )
+            return
+
+        current_id, current_name = game["players"][game["turn"]]
+        if user.id != current_id:
+            await query.answer("Sıra sende değil.\nСейчас не твой ход.", show_alert=True)
+            return
+
+        await query.answer()
+
+        # Bu tur için kullanılan butonu kaldır, tekrar tıklanmasın.
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        dice_message = await context.bot.send_dice(chat_id=chat_id, emoji="🎲")
+        value = dice_message.dice.value
+        await asyncio.sleep(3.5)
+
+        game["positions"][user.id] += value
+        pos = game["positions"][user.id]
+
+        if pos >= DICE_BOARD_LEN:
+            text = (
+                f"🏁 {current_name} {value} attı ve bitişe ulaştı!\n"
+                f"🏆 Kazanan: {current_name}\n\n"
+                f"🏁 {current_name} выбросил(а) {value} и дошёл(шла) до финиша!\n"
+                f"🏆 Победитель: {current_name}"
+            )
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            dice_games.pop(chat_id, None)
+            return
+
+        game["turn"] = 1 - game["turn"]
+        next_id, next_name = game["players"][game["turn"]]
+        text = (
+            f"🎲 {current_name}: {value} attı, konum {pos}/{DICE_BOARD_LEN}\n"
+            f"🎲 {current_name}: выбросил(а) {value}, позиция {pos}/{DICE_BOARD_LEN}\n\n"
+            f"Sıra sende, {next_name}!\n"
+            f"Твой ход, {next_name}!"
+        )
+        keyboard = [[InlineKeyboardButton("🎲 Zar at / Бросить кости", callback_data="zar_roll")]]
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("kalem", tkm_command))
     app.add_handler(CommandHandler("kalems", kalems_command))
+    app.add_handler(CommandHandler("zar", zar_command))
+    app.add_handler(CommandHandler("zars", zars_command))
+    app.add_handler(CommandHandler("kosti", zar_command))
+    app.add_handler(CommandHandler("kostistop", zars_command))
     app.add_handler(CallbackQueryHandler(tkm_callback, pattern="^tkm_"))
+    app.add_handler(CallbackQueryHandler(zar_callback, pattern="^zar_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot başlatıldı, mesajlar dinleniyor...")
     app.run_polling()
