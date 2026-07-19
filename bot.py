@@ -288,9 +288,27 @@ async def zar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
 
-        dice_message = await context.bot.send_dice(chat_id=chat_id, emoji="🎲")
-        value = dice_message.dice.value
-        await asyncio.sleep(3.5)
+        try:
+            dice_message = await context.bot.send_dice(chat_id=chat_id, emoji="🎲")
+            value = dice_message.dice.value
+            await asyncio.sleep(3.5)
+        except Exception:
+            # İnternet/bağlantı hatası: kilidi aç, oyuncu tekrar deneyebilsin.
+            logger.exception("Zar atılırken bağlantı hatası")
+            game["rolling"] = False
+            keyboard = [[InlineKeyboardButton("🎲 Zar at / Бросить кости", callback_data="zar_roll")]]
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ Bağlantı sorunu oldu, zar atılamadı. Tekrar dene.\n"
+                        "⚠️ Проблема с соединением, кости не брошены. Попробуй снова."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception:
+                pass
+            return
 
         game["positions"][user.id] += value
         pos = game["positions"][user.id]
@@ -334,7 +352,11 @@ async def zar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"Твой ход, {next_name}!"
         )
         keyboard = [[InlineKeyboardButton("🎲 Zar at / Бросить кости", callback_data="zar_roll")]]
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            logger.exception("Sonuç mesajı gönderilirken bağlantı hatası")
+            game["rolling"] = False
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
